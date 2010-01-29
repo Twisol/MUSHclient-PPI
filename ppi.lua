@@ -1,44 +1,60 @@
-local __V_MAJOR, __V_MINOR, __V_PATCH = 1, 1, 0
+-- Semantic versioning: http://semver.org/
+local __V_MAJOR, __V_MINOR, __V_PATCH = 1, 2, 1
 local __VERSION = string.format("%d.%d.%d", __V_MAJOR, __V_MINOR, __V_PATCH)
 
+-- Contains a list of PPI proxies to other plugins.
+-- Also contains private data for each PPI.
 local PPI_list = {}
 
+-- Local data for this plugin's PPI
 local myID = GetPluginID()
 local myPPI = {}
+local func_list = {}
 
-local array_id   = function(id)      return "PPIarray_" .. id   end
-local params_id  = function(id)      return "PPIparams_" .. id  end
-local method_id  = function(id)      return "PPImethod_" .. id  end
+-- Variable names
+local params_id = "PPIparams"
 
-local request_id  = function(id) return "PPI_" .. id .. "_REQUEST"  end
-local cleanup_id  = function(id) return "PPI_" .. id .. "_CLEANUP"  end
-local supports_id = function(id) return "PPI_" .. id .. "_SUPPORTS" end
+-- Message IDs
+local request_msg  = "PPI_REQUEST"
+local access_msg = "PPI_SUPPORTS"
+local cleanup_msg  = "PPI_CLEANUP"
+
+-- Forward decl of new_thunk. Defined later in the file
+-- so it can access send_request(), but declared here
+-- so deserialize() can access it.
+local new_thunk = nil
 
 
-function serialize(params, params_list)
-  if not params_list then
+-- Serializes a Lua table into a list of serialized strings.
+-- Each string is a single serialized table. [1] is the original table.
+-- [2] and beyond are tables contained by [1].
+--
+-- The second and third params should not be used externally.
+local function serialize(params, params_list, state)
+  -- External entry point.
+  if not params_list or not state then
     local params_list = {}
-    serialize(params, params_list)
-    
-    local list = {}
-    for k,v in ipairs(params_list) do
-      list[k] = v
-    end
-    return list
+    serialize(params, params_list, {})
+    return params_list
   end
   
-  if params_list[params] then
-    return params_list[params]
+  -- If this table was already serialized, return its ID.
+  if state[params] then
+    return state[params]
   end
   
+  -- Register the table in the state list, and reserve its spot
+  -- in the serialized list
   local index = #params_list + 1
-  params_list[params] = index
+  state[params] = index
   params_list[index] = true
   
-  local id = array_id(index)
-  ArrayCreate(id)
+  -- Serialize every argument in the table, and add it to this array.
+  local ary_id = "PPIarray_" .. index
+  ArrayCreate(ary_id)
   
   for k,v in pairs(params) do
+    -- Only support string or number keys.
     local key = nil
     if type(k) == "string" then
       key = "s:" .. k
@@ -52,47 +68,73 @@ function serialize(params, params_list)
       if type(v) == "string" then
         value = "s:" .. v
       elseif type(v) == "number" then
-        value = "n:" .. v
+        value = "n:" .. tostring(v)
       elseif type(v) == "boolean" then
         value = "b:" .. (v and "1" or "0")
       elseif type(v) == "table" then
-        value = "t:" .. serialize(v, params_list)
+        value = "t:" .. serialize(v, params_list, state)
+      elseif type(v) == "function" then
+        value = func_list[v]
+        if not value then
+          table.insert(func_list, v)
+          func_list[v] = #func_list
+          value = #func_list
+        end
+        value = "f:" .. tostring(value)
       end
       
-      ArraySet(id, key, value)
+      ArraySet(ary_id, key, value)
     end
   end
   
-  params_list[index] = ArrayExport(id, "|")
-  ArrayDelete(id)
+  -- Add the serialized string to the list.
+  params_list[index] = ArrayExport(ary_id, "|")
+
+  -- Delete the array so we clean up our mess
+  ArrayDelete(ary_id)
   
+  -- Let the calling code know what this table's ID is.
   return index
 end
 
-function deserialize(data_list, index, state)
+-- Deserializes a Lua table from a list of serialized strings.
+-- The ID is used to deserialize and store function thunks.
+--
+-- The third and fourth params should not be used externally.
+local function deserialize(id, data_list, index, state)
+  -- External entry point.
   if not index or not state then
-    return deserialize(data_list, 1, {})
+    return deserialize(id, data_list, 1, {})
   end
   
+  -- If this string was already deserialized, return its table.
   if state[index] then
     return state[index]
   end
   
+  -- Create a new table to store the deserialized data in.
+  -- Set it in the state table in case it's referred to multiple times.
   local tbl = {}
   state[index] = tbl
   
-  local id = array_id(index)
-  ArrayCreate(id)
-  ArrayImport(id, data_list[index], "|")
+  -- Create an array and load the serialized string into it.
+  local ary_id = "PPIarray_" .. index
+  ArrayCreate(ary_id)
+  ArrayImport(ary_id, data_list[index], "|")
   
-  for k,v in pairs(ArrayList(id)) do
+  -- Go over each key/value pair in the array, deserialize it,
+  -- and add it to the table.
+  for k,v in pairs(ArrayList(ary_id)) do
     local key_type = k:sub(1,1)
-    local key = nil
+    local key = k:sub(3)
     
+    -- only allow string or number keys
     if key_type == "s" then
-      key = k:sub(3)
+      -- key is already deserialized
     elseif key_type == "n" then
-      key = tonumber(k:sub(3))
+      key = tonumber(key)
+    else
+      key = nil
     end
     
     if key then
@@ -100,80 +142,134 @@ function deserialize(data_list, index, state)
       local item = v:sub(3)
       
       if item_type == "s" then
-        tbl[key] = item
+        -- item is already deserialized
       elseif item_type == "n" then
-        tbl[key] = tonumber(item)
+        item = tonumber(item)
       elseif item_type == "b" then
-        tbl[key] = ((item == "1") and true or false)
+        item = ((item == "1") and true or false)
       elseif item_type == "t" then
-        tbl[key] = deserialize(data_list, tonumber(item), state)
+        item = deserialize(id, data_list, tonumber(item), state)
+      elseif item_type == "f" then
+        local thunks = PPI_list[id].thunks
+        local thunk = thunks[tonumber(item)]
+        
+        if not thunk then
+          thunk = new_thunk(id, tonumber(item))
+          thunks[tonumber(item)] = thunk
+        end
+        
+        item = thunk
       else
-        tbl[key] = nil
+        item = nil
       end
+      
+      tbl[key] = item
     end
   end
   
-  ArrayDelete(id)
+  -- Delete the array so we clean up our mess
+  ArrayDelete(ary_id)
   
+  -- Return the deserialized table
   return tbl
 end
 
-local function request(id, func_name, ...)
-  -- Prepare the arguments
-  local params = {...}
+-- Serializes and pushes the table of parameters
+-- to MUSHclient variables.
+local function send_params(params)
   for k,v in ipairs(serialize(params)) do
-    SetVariable(params_id(id) .. "_" .. k, v)
+    SetVariable(params_id .. "_" .. k, v)
   end
-  
-  -- Call the method
-  SetVariable(method_id(id), func_name)
-  CallPlugin(id, request_id(id), myID)
-  
-  -- Gather the return values
-  local returns = {}
+end
+
+-- Retreives and deserializes a table of parameters
+-- from another plugin's MUSHclient variables.
+local function receive_params(id)
+  -- Deserialize parameters
+  local params = {}
   local i = 1
-  while GetPluginVariable(id, params_id(myID) .. "_" .. i) do
-    returns[i] = GetPluginVariable(id, params_id(myID) .. "_" .. i)
+  while GetPluginVariable(id, params_id .. "_" .. i) do
+    params[i] = GetPluginVariable(id, params_id .. "_" .. i)
     i = i + 1
   end
-  returns = deserialize(returns)
+  return deserialize(id, params)
+end
+
+-- Called to have the other plugin clean up
+local function send_cleanup(id)
+  CallPlugin(id, cleanup_msg, myID)
+end
+
+-- Called to access and return a value from the service.
+local function send_access(id, name)
+  if not PluginSupports(id, access_msg) then
+    return nil
+  end
+  
+  -- Prepare the arguments
+  send_params({name})
+  
+  -- Call the plugin
+  CallPlugin(id, access_msg, myID)
+  
+  -- Deserialize parameters
+  local returns = receive_params(id)
   
   -- Have the other plugin clean up its return values
-  CallPlugin(id, cleanup_id(id), myID)
+  send_cleanup(id)
   
+  -- Return the received values
   return unpack(returns)
 end
 
--- A 'thunk' is a delayed resolver function.
-local function new_thunk(id, func_name)
+-- Called by a thunk to call a remote method.
+local function send_request(id, func_id, ...)
+  if not PluginSupports(id, request_msg) then
+    error("The service does not support PPI REQUEST messages.")
+  end
+  
+  -- Prepare the arguments
+  send_params({func_id, ...})
+  
+  -- Call the plugin
+  CallPlugin(id, request_msg, myID)
+  
+  -- Gather the return values
+  local returns = receive_params(id)
+  
+  -- Have the other plugin clean up its return values
+  send_cleanup(id)
+  
+  -- Return the received values.
+  return unpack(returns)
+end
+
+-- Declared earlier in the file as local, see note there.
+-- Creates a new resolver thunk.
+function new_thunk(id, func_name)
+  local current_nonce = PPI_list[id].nonce
   return function(...)
-    return request(id, func_name, ...)
+    -- Make sure it's still a valid function by checking the nonce
+    if GetPluginInfo(id, 22) ~= current_nonce then
+      error("The remote plugin has been reinstalled since the last time this method was accessed.")
+    end
+    
+    return send_request(id, func_name, ...)
   end
 end
 
--- If the requested function hasn't yet had a thunk created,
--- create a new thunk and return it.
 local PPI_meta = {
+  -- Retrieves the given value by key at the service.
   __index = function(tbl, idx)
-    local id = PPI_list[tbl].id
-    
-    -- Check if the method is supported, first.
-    SetVariable(method_id(id), idx)
-    CallPlugin(id, supports_id(id), myID)
-    
-    if GetPluginVariable(id, method_id(myID)) ~= "true" then
-      CallPlugin(id, cleanup_id(id), myID)
-      return nil
-    end
-    DeleteVariable(method_id(id))
-
-    -- If it's supported, create a thunk.
-    local thunk = new_thunk(id, idx)
-    tbl[idx] = thunk
-    return thunk
+    return send_access(PPI_list[tbl], idx)
+  end,
+  
+  __newindex = function(tbl, idx, val)
+    error("The client PPI is READ-ONLY! Do not write to this table!")
   end,
 }
 
+-- The returned module table.
 local PPI = {
   __V = __VERSION,
   __V_MAJOR = __V_MAJOR,
@@ -181,70 +277,95 @@ local PPI = {
   __V_PATCH = __V_PATCH,
   
   -- Used to retreive a PPI for a specified plugin.
-  Load = function(plugin_id)
-    if not IsPluginInstalled(plugin_id) then
+  Load = function(id)
+    -- Is the plugin installed?
+    if not IsPluginInstalled(id) then
       return nil, "not_installed"
-    elseif not PluginSupports(plugin_id, request_id(plugin_id)) then
+    -- Does the plugin support PPI requests?
+    elseif not PluginSupports(id, request_msg) then
       return nil, "no_ppi"
     end
     
-    local tbl = PPI_list[plugin_id]
+    -- Get the PPI record
+    local tbl = PPI_list[id]
+    local reloaded = true
+   
+    -- Create one if there isn't one yet
     if not tbl then
-      tbl = setmetatable({}, PPI_meta)
-      PPI_list[tbl] = {id = plugin_id}
-      PPI_list[plugin_id] = tbl
+      tbl = {
+        ppi = setmetatable({}, PPI_meta),
+        id = id,
+        thunks = {},
+        nonce = GetPluginInfo(id, 22),
+      }
+      
+      PPI_list[id] = tbl
+      PPI_list[tbl.ppi] = id
+    -- If there is one, reload it if the plugin's nonce has changed.
+    elseif tbl.nonce ~= GetPluginInfo(id, 22) then
+      tbl.nonce = GetPluginInfo(id, 22)
+      tbl.thunks = {}
+--  else
+--    reloaded = false
     end
-    return tbl
+    
+    return tbl.ppi, reloaded
   end,
   
   -- Used by a plugin to expose methods to other plugins
   -- through its own PPI.
-  Expose = function(name, func)
-    myPPI[name] = (func and func or _G[name])
+  Expose = function(name, data)
+    -- Add the data to the exposed PPI
+    myPPI[name] = data or _G[name]
   end,
 }
 
 -- PPI request resolver
-_G[request_id(myID)] = function(id)
-  -- Get requested method
-  local func = myPPI[GetPluginVariable(id, method_id(myID))]
+_G[request_msg] = function(id)
+  -- Ensure that a PPI record exists for the client
+  PPI.Load(id)
+  
+  -- Deserialize parameters
+  local params = receive_params(id)
+  local func = func_list[table.remove(params, 1)]
+  
+  -- Tell other plugin to clean up
+  send_cleanup(id)
+  
   if not func then
     return
   end
   
+  -- Call method, return values
+  send_params({func(unpack(params))})
+end
+
+-- When an exposed value is accessed
+_G[access_msg] = function(id)
+  -- Ensure that a PPI record exists for the client
+  PPI.Load(id)
+  
   -- Deserialize parameters
-  local params = {}
-  local i = 1
-  while GetPluginVariable(id, params_id(myID) .. "_" .. i) do
-    params[i] = GetPluginVariable(id, params_id(myID) .. "_" .. i)
-    i = i + 1
-  end
-  params = deserialize(params)
+  local params = receive_params(id)
+  local item = myPPI[unpack(params)]
   
   -- Tell other plugin to clean up
-  CallPlugin(id, cleanup_id(id), myID)
+  send_cleanup(id)
   
-  -- Call method, return values
-  local returns = {func(unpack(params))}
-  for k,v in ipairs(serialize(returns)) do
-    SetVariable(params_id(id) .. "_" .. k, v)
-  end
+  -- Set the return values
+  send_params({item})
 end
 
--- method/params/returns cleaner
-_G[cleanup_id(myID)] = function(id)
+-- params/returns cleaner
+_G[cleanup_msg] = function(id)
+  -- clean up all params
   local i = 1
-  while GetVariable(params_id(id) .. "_" .. i) do
-    DeleteVariable(params_id(id) .. "_" .. i)
+  while GetVariable(params_id .. "_" .. i) do
+    DeleteVariable(params_id .. "_" .. i)
     i = i + 1
   end
-  DeleteVariable(method_id(id))
 end
 
--- Does this plugin support a given method?
-_G[supports_id(myID)] = function(id)
-  local func = myPPI[GetPluginVariable(id, method_id(myID))]
-  SetVariable(method_id(id), func and "true" or "false")
-end
 
+-- Return the module table
 return PPI
