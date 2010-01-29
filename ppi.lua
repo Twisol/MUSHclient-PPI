@@ -1,5 +1,5 @@
 -- Semantic versioning: http://semver.org/
-local __V_MAJOR, __V_MINOR, __V_PATCH = 1, 2, 3
+local __V_MAJOR, __V_MINOR, __V_PATCH = 1, 2, 4
 local __VERSION = string.format("%d.%d.%d", __V_MAJOR, __V_MINOR, __V_PATCH)
 
 -- Contains a list of PPI proxies to other plugins.
@@ -15,12 +15,12 @@ local func_list = {}
 local params_id = "PPIparams"
 
 -- Message IDs
-local request_msg  = "PPI_REQUEST"
+local invoke_msg  = "PPI_INVOKE"
 local access_msg = "PPI_ACCESS"
 local cleanup_msg  = "PPI_CLEANUP"
 
 -- Forward decl of new_thunk. Defined later in the file
--- so it can access send_request(), but declared here
+-- so it can access send_invoke(), but declared here
 -- so deserialize() can access it.
 local new_thunk = nil
 
@@ -202,7 +202,7 @@ end
 
 -- Called to access and return a value from the service.
 local function send_access(id, name)
-  if not PluginSupports(id, access_msg) then
+  if PluginSupports(id, access_msg) ~= 0 then
     return nil
   end
   
@@ -223,16 +223,18 @@ local function send_access(id, name)
 end
 
 -- Called by a thunk to call a remote method.
-local function send_request(id, func_id, ...)
-  if not PluginSupports(id, request_msg) then
-    error("The service does not support PPI REQUEST messages.")
+local function send_invoke(id, func_id, ...)
+  if PluginSupports(id, invoke_msg) ~= 0 then
+    error("The service does not support PPI INVOKE messages.")
   end
   
   -- Prepare the arguments
   send_params({func_id, ...})
   
   -- Call the plugin
-  CallPlugin(id, request_msg, myID)
+  local curr_caller = PPI.CallerID
+  CallPlugin(id, invoke_msg, myID)
+  PPI.CallerID = curr_caller
   
   -- Gather the return values
   local returns = receive_params(id)
@@ -254,7 +256,7 @@ function new_thunk(id, func_name)
       error("The remote plugin has been reinstalled since the last time this method was accessed.")
     end
     
-    return send_request(id, func_name, ...)
+    return send_invoke(id, func_name, ...)
   end
 end
 
@@ -271,10 +273,15 @@ local PPI_meta = {
 
 -- The returned module table.
 local PPI = {
+  -- Version identifiers
   __V = __VERSION,
   __V_MAJOR = __V_MAJOR,
   __V_MINOR = __V_MINOR,
   __V_PATCH = __V_PATCH,
+  
+  -- Given a value during execution of callbacks
+  CallerID = nil,
+  
   
   -- Used to retreive a PPI for a specified plugin.
   Load = function(id)
@@ -284,8 +291,8 @@ local PPI = {
     -- Is the plugin enabled?
     elseif not GetPluginInfo(id, 17) then
       return nil, "not_enabled"
-    -- Does the plugin support PPI requests?
-    elseif not PluginSupports(id, request_msg) then
+    -- Does the plugin support PPI invocations?
+    elseif PluginSupports(id, invoke_msg) ~= 0 then
       return nil, "no_ppi"
     end
     
@@ -323,8 +330,8 @@ local PPI = {
   end,
 }
 
--- PPI request resolver
-_G[request_msg] = function(id)
+-- PPI invocation resolver
+_G[invoke_msg] = function(id)
   -- Ensure that a PPI record exists for the client
   PPI.Load(id)
   
@@ -339,8 +346,13 @@ _G[request_msg] = function(id)
     return
   end
   
-  -- Call method, return values
-  send_params({func(unpack(params))})
+  -- Call method, get return values
+  PPI.CallerID = id
+  local returns = {func(unpack(params))}
+  PPI.CallerID = nil
+  
+  -- Send returns
+  send_params(returns)
 end
 
 -- When an exposed value is accessed
