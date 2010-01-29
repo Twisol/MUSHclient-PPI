@@ -1,5 +1,5 @@
 -- Semantic versioning: http://semver.org/
-local __V_MAJOR, __V_MINOR, __V_PATCH = 1, 2, 1
+local __V_MAJOR, __V_MINOR, __V_PATCH = 1, 2, 2
 local __VERSION = string.format("%d.%d.%d", __V_MAJOR, __V_MINOR, __V_PATCH)
 
 -- Contains a list of PPI proxies to other plugins.
@@ -16,7 +16,7 @@ local params_id = "PPIparams"
 
 -- Message IDs
 local request_msg  = "PPI_REQUEST"
-local access_msg = "PPI_SUPPORTS"
+local access_msg = "PPI_ACCESS"
 local cleanup_msg  = "PPI_CLEANUP"
 
 -- Forward decl of new_thunk. Defined later in the file
