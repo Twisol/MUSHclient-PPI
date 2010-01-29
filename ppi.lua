@@ -1,5 +1,5 @@
 -- Semantic versioning: http://semver.org/
-local __V_MAJOR, __V_MINOR, __V_PATCH = 1, 2, 2
+local __V_MAJOR, __V_MINOR, __V_PATCH = 1, 2, 3
 local __VERSION = string.format("%d.%d.%d", __V_MAJOR, __V_MINOR, __V_PATCH)
 
 -- Contains a list of PPI proxies to other plugins.
@@ -120,7 +120,7 @@ local function deserialize(id, data_list, index, state)
   -- Create an array and load the serialized string into it.
   local ary_id = "PPIarray_" .. index
   ArrayCreate(ary_id)
-  ArrayImport(ary_id, data_list[index], "|")
+  ArrayImport(ary_id, data_list[index] or "", "|")
   
   -- Go over each key/value pair in the array, deserialize it,
   -- and add it to the table.
@@ -281,6 +281,9 @@ local PPI = {
     -- Is the plugin installed?
     if not IsPluginInstalled(id) then
       return nil, "not_installed"
+    -- Is the plugin enabled?
+    elseif not GetPluginInfo(id, 17) then
+      return nil, "not_enabled"
     -- Does the plugin support PPI requests?
     elseif not PluginSupports(id, request_msg) then
       return nil, "no_ppi"
