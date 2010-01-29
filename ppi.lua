@@ -1,28 +1,128 @@
+local __V_MAJOR, __V_MINOR, __V_PATCH = 1, 0, 0
+local __VERSION = string.format("%d.%d.%d", __V_MAJOR, __V_MINOR, __V_PATCH)
+
 local PPI_list = {}
 
 local myID = GetPluginID()
 local myPPI = {}
 
-local params_id  = function(id) return "PPIparams_" .. id  end
-local method_id  = function(id) return "PPImethod_" .. id  end
-local returns_id = function(id) return "PPIreturns_" .. id end
+local array_id   = function(id)      return "PPIarray_" .. id   end
+local params_id  = function(id)      return "PPIparams_" .. id  end
+local method_id  = function(id)      return "PPImethod_" .. id  end
 
 local request_id = function(id) return "PPI_" .. id .. "_REQUEST" end
 local cleanup_id = function(id) return "PPI_" .. id .. "_CLEANUP" end
 
 
+function serialize(params, params_list)
+  if not params_list then
+    local params_list = {}
+    serialize(params, params_list)
+    
+    local list = {}
+    for k,v in ipairs(params_list) do
+      list[k] = v
+    end
+    return list
+  end
+  
+  if params_list[params] then
+    return params_list[params]
+  end
+  
+  local index = #params_list + 1
+  params_list[params] = index
+  params_list[index] = true
+  
+  local id = array_id(index)
+  ArrayCreate(id)
+  
+  for k,v in pairs(params) do
+    local key = nil
+    if type(k) == "string" then
+      key = "s:" .. k
+    elseif type(k) == "number" then
+      key = "n:" .. k
+    end
+    
+    if key then
+      local value = "z:~"
+      
+      if type(v) == "string" then
+        value = "s:" .. v
+      elseif type(v) == "number" then
+        value = "n:" .. v
+      elseif type(v) == "boolean" then
+        value = "b:" .. (v and "1" or "0")
+      elseif type(v) == "table" then
+        value = "t:" .. serialize(v, params_list)
+      end
+      
+      ArraySet(id, key, value)
+    end
+  end
+  
+  params_list[index] = ArrayExport(id, "|")
+  ArrayDelete(id)
+  
+  return index
+end
+
+function deserialize(data_list, index, state)
+  if not index or not state then
+    return deserialize(data_list, 1, {})
+  end
+  
+  if state[index] then
+    return state[index]
+  end
+  
+  local tbl = {}
+  state[index] = tbl
+  
+  local id = "id" .. index
+  ArrayCreate(id)
+  ArrayImport(id, data_list[index], "|")
+  
+  for k,v in pairs(ArrayList(id)) do
+    local key_type = k:sub(1,1)
+    local key = nil
+    
+    if key_type == "s" then
+      key = k:sub(3)
+    elseif key_type == "n" then
+      key = tonumber(k:sub(3))
+    end
+    
+    if key then
+      local item_type = v:sub(1,1)
+      local item = v:sub(3)
+      
+      if item_type == "s" then
+        tbl[key] = item
+      elseif item_type == "n" then
+        tbl[key] = tonumber(item)
+      elseif item_type == "b" then
+        tbl[key] = ((item == "1") and true or false)
+      elseif item_type == "t" then
+        tbl[key] = deserialize(data_list, tonumber(item), state)
+      else
+        tbl[key] = nil
+      end
+    end
+  end
+  
+  ArrayDelete(id)
+  
+  return tbl
+end
+
 local function request(id, func_name, ...)
   -- Prepare the arguments
   local params = {...}
-  
-  ArrayCreate(params_id(id))
-  
-  for i=1,#params do
-    ArraySet(params_id(id), tostring(i), tostring(params[i]))
+  for k,v in ipairs(serialize(params)) do
+    SetVariable(params_id(id) .. "_" .. k, v)
   end
-
-  SetVariable(params_id(id), ArrayExport(params_id(id), "|"))
-  ArrayDelete(params_id(id))
   
   -- Call the method
   SetVariable(method_id(id), func_name)
@@ -34,14 +134,12 @@ local function request(id, func_name, ...)
   
   -- Gather the return values
   local returns = {}
-  
-  ArrayCreate(returns_id(id))
-  ArrayImport(returns_id(id), GetPluginVariable(id, returns_id(myID)), "|")
-  
-  for k,v in pairs(ArrayList(returns_id(id))) do
-    returns[tonumber(k)] = v
+  local i = 1
+  while GetPluginVariable(id, params_id(myID) .. "_" .. i) do
+    returns[i] = GetPluginVariable(id, params_id(myID) .. "_" .. i)
+    i = i + 1
   end
-  ArrayDelete(returns_id(id))
+  returns = deserialize(returns)
   
   -- Have the other plugin clean up its return values
   CallPlugin(id, cleanup_id(id), myID)
@@ -67,6 +165,11 @@ local PPI_meta = {
 }
 
 local PPI = {
+  __V = __VERSION,
+  __V_MAJOR = __V_MAJOR,
+  __V_MINOR = __V_MINOR,
+  __V_PATCH = __V_PATCH,
+  
   -- Used to retreive a PPI for a specified plugin.
   Load = function(plugin_id)
     if not IsPluginInstalled(plugin_id) then
@@ -91,35 +194,35 @@ local PPI = {
 
 -- PPI request resolver
 _G[request_id(myID)] = function(id)
-  ArrayCreate(params_id(id))
-  ArrayImport(params_id(id), GetPluginVariable(id, params_id(myID)), "|")
-  
-  local params = {}
-  for k,v in pairs(ArrayList(params_id(id))) do
-    params[tonumber(k)] = v
-  end
-  ArrayDelete(params_id(id))
-  
-  local func_name = GetPluginVariable(id, method_id(myID))
-  local func = myPPI[func_name]
+  -- Get requested method
+  local func = myPPI[GetPluginVariable(id, method_id(myID))]
   if not func then
     return
   end
   
-  local returns = {func(unpack(params))}
-  ArrayCreate(returns_id(id))
-  
-  for i=1,#returns do
-    ArraySet(returns_id(id), tostring(i), tostring(returns[i]))
+  -- Deserialize parameters
+  local params = {}
+  local i = 1
+  while GetPluginVariable(id, params_id(myID) .. "_" .. i) do
+    params[i] = GetPluginVariable(id, params_id(myID) .. "_" .. i)
+    i = i + 1
   end
-
-  SetVariable(returns_id(id), ArrayExport(returns_id(id), "|"))
-  ArrayDelete(returns_id(id))
+  params = deserialize(params)
+  
+  -- Call method, return values
+  local returns = {func(unpack(params))}
+  for k,v in ipairs(serialize(returns)) do
+    SetVariable(params_id(id) .. "_" .. k, v)
+  end
 end
 
 -- Return value cleaner
 _G[cleanup_id(myID)] = function(id)
-  DeleteVariable(returns_id(id))
+  local i = 1
+  while GetVariable(params_id(id) .. "_" .. i) do
+    DeleteVariable(params_id(id) .. "_" .. i)
+    i = i + 1
+  end
 end
 
 return PPI
