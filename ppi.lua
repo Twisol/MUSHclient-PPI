@@ -1,10 +1,24 @@
 -- Semantic versioning: http://semver.org/
-local __V_MAJOR, __V_MINOR, __V_PATCH = 1, 2, 4
+local __V_MAJOR, __V_MINOR, __V_PATCH = 1, 3, 0
 local __VERSION = string.format("%d.%d.%d", __V_MAJOR, __V_MINOR, __V_PATCH)
+
+-- The module table's variable
+local PPI = {
+  -- Version identifiers
+  __V = __VERSION,
+  __V_MAJOR = __V_MAJOR,
+  __V_MINOR = __V_MINOR,
+  __V_PATCH = __V_PATCH,
+  
+  -- More added later in the file
+}
 
 -- Contains a list of PPI proxies to other plugins.
 -- Also contains private data for each PPI.
 local PPI_list = {}
+
+-- Loader callbacks (added in v1.3.0)
+local loaders = {}
 
 -- Local data for this plugin's PPI
 local myID = GetPluginID()
@@ -271,64 +285,78 @@ local PPI_meta = {
   end,
 }
 
--- The returned module table.
-local PPI = {
-  -- Version identifiers
-  __V = __VERSION,
-  __V_MAJOR = __V_MAJOR,
-  __V_MINOR = __V_MINOR,
-  __V_PATCH = __V_PATCH,
+
+-- Given a value during execution of callbacks
+PPI.CallerID = nil
   
-  -- Given a value during execution of callbacks
-  CallerID = nil,
+-- Used to retreive a PPI for a specified plugin.
+PPI.Load = function(id)
+  -- Is the plugin installed?
+  if not IsPluginInstalled(id) then
+    return nil, "not_installed"
+  -- Is the plugin enabled?
+  elseif not GetPluginInfo(id, 17) then
+    return nil, "not_enabled"
+  -- Does the plugin support PPI invocations?
+  elseif PluginSupports(id, invoke_msg) ~= 0 then
+    return nil, "no_ppi"
+  end
   
-  
-  -- Used to retreive a PPI for a specified plugin.
-  Load = function(id)
-    -- Is the plugin installed?
-    if not IsPluginInstalled(id) then
-      return nil, "not_installed"
-    -- Is the plugin enabled?
-    elseif not GetPluginInfo(id, 17) then
-      return nil, "not_enabled"
-    -- Does the plugin support PPI invocations?
-    elseif PluginSupports(id, invoke_msg) ~= 0 then
-      return nil, "no_ppi"
-    end
+  -- Get the PPI record
+  local tbl = PPI_list[id]
+  local reloaded = true
+ 
+  -- Create one if there isn't one yet
+  if not tbl then
+    tbl = {
+      ppi = setmetatable({}, PPI_meta),
+      id = id,
+      thunks = {},
+      nonce = GetPluginInfo(id, 22),
+    }
     
-    -- Get the PPI record
-    local tbl = PPI_list[id]
-    local reloaded = true
-   
-    -- Create one if there isn't one yet
-    if not tbl then
-      tbl = {
-        ppi = setmetatable({}, PPI_meta),
-        id = id,
-        thunks = {},
-        nonce = GetPluginInfo(id, 22),
-      }
-      
-      PPI_list[id] = tbl
-      PPI_list[tbl.ppi] = id
-    -- If there is one, reload it if the plugin's nonce has changed.
-    elseif tbl.nonce ~= GetPluginInfo(id, 22) then
-      tbl.nonce = GetPluginInfo(id, 22)
-      tbl.thunks = {}
---  else
---    reloaded = false
-    end
-    
-    return tbl.ppi, reloaded
-  end,
+    PPI_list[id] = tbl
+    PPI_list[tbl.ppi] = id
+  -- If there is one, reload it if the plugin's nonce has changed.
+  elseif tbl.nonce ~= GetPluginInfo(id, 22) then
+    tbl.nonce = GetPluginInfo(id, 22)
+    tbl.thunks = {}
+  else
+    reloaded = false
+  end
   
-  -- Used by a plugin to expose methods to other plugins
-  -- through its own PPI.
-  Expose = function(name, data)
-    -- Add the data to the exposed PPI
-    myPPI[name] = data or _G[name]
-  end,
-}
+  return tbl.ppi, reloaded
+end
+  
+-- Used by a plugin to expose methods to other plugins
+-- through its own PPI.
+PPI.Expose = function(name, data)
+  -- Add the data to the exposed PPI
+  myPPI[name] = data or _G[name]
+end
+
+PPI.OnLoad = function(id, on_success, on_failure)
+  loaders[id] = {
+    success=on_success,
+    failure=on_failure,
+  }
+end
+
+PPI.Refresh = function()
+  for id, callbacks in pairs(loaders) do
+    local iface, is_reloaded = PPI.Load(id)
+    if not iface then
+      if callbacks.failure then
+        callbacks.failure(is_reloaded)
+      end
+    elseif is_reloaded then
+      if callbacks.success then
+        callbacks.success(iface)
+      end
+    end
+  end
+end
+
 
 -- PPI invocation resolver
 _G[invoke_msg] = function(id)
