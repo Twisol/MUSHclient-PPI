@@ -375,9 +375,10 @@ _G[invoke_msg] = function(id)
   end
   
   -- Call method, get return values
+  local oldID = PPI.CallerID
   PPI.CallerID = id
   local returns = {func(unpack(params))}
-  PPI.CallerID = nil
+  PPI.CallerID = oldID
   
   -- Send returns
   send_params(returns)
